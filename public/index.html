@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>chat jimmy — api</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 ui-monospace, "JetBrains Mono", monospace; background: #101014; color: #e8e8ea; display: flex; height: 100vh; }
+  #bar { width: 240px; border-right: 1px solid #26262c; display: flex; flex-direction: column; }
+  #bar header { padding: 12px; border-bottom: 1px solid #26262c; display: flex; gap: 8px; }
+  #new { flex: 1; background: #6c4bd6; border: 0; color: white; padding: 8px; border-radius: 6px; cursor: pointer; font: inherit; }
+  #chats { overflow-y: auto; flex: 1; }
+  .chat { padding: 10px 12px; cursor: pointer; border-bottom: 1px solid #1b1b20; display: flex; justify-content: space-between; gap: 6px; }
+  .chat:hover { background: #1a1a21; }
+  .chat.active { background: #23232e; }
+  .chat .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chat .x { color: #666; }
+  .chat .x:hover { color: #f55; }
+  main { flex: 1; display: flex; flex-direction: column; }
+  #msgs { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  .m { max-width: 85%; padding: 10px 12px; border-radius: 8px; white-space: pre-wrap; }
+  .user { align-self: flex-end; background: #3a2d6e; }
+  .assistant { align-self: flex-start; background: #1e1e26; }
+  .meta { font-size: 11px; color: #8a8a95; margin-top: 4px; }
+  form { display: flex; gap: 8px; padding: 12px; border-top: 1px solid #26262c; }
+  input { flex: 1; background: #1a1a21; color: inherit; border: 1px solid #2c2c34; border-radius: 6px; padding: 10px; font: inherit; }
+  button.send { background: #2f8f5b; border: 0; color: white; padding: 0 18px; border-radius: 6px; cursor: pointer; font: inherit; }
+  button.send:disabled { opacity: .5; }
+  .err { align-self: center; color: #f77; }
+  .err button { margin-left: 8px; background: #a33; color: white; border: 0; border-radius: 4px; padding: 2px 8px; cursor: pointer; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <header><button id="new">+ new chat</button></header>
+  <div id="chats"></div>
+</div>
+<main>
+  <div id="msgs"><div class="meta" style="align-self:center">type below — a new chat appears in the bar</div></div>
+  <form id="f">
+    <input id="i" placeholder="message chat jimmy…" autocomplete="off" />
+    <button class="send" id="go">send</button>
+  </form>
+</main>
+<script>
+const $ = (s) => document.querySelector(s);
+let current = null;
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const j = await r.json();
+  if (!r.ok) throw Object.assign(new Error(j.error || r.status), { j });
+  return j;
+}
+
+async function refreshBar() {
+  const { chats } = await api("/api/chats");
+  $("#chats").innerHTML = "";
+  for (const c of chats) {
+    const d = document.createElement("div");
+    d.className = "chat" + (c.id === current ? " active" : "");
+    d.innerHTML = `<span class="t"></span><span class="x">×</span>`;
+    d.querySelector(".t").textContent = c.title;
+    d.onclick = (e) => {
+      if (e.target.classList.contains("x")) { api(`/api/chats/${c.id}`, { method: "DELETE" }).then(() => { if (current === c.id) { current = null; renderMsgs([]); } refreshBar(); }); return; }
+      open(c.id);
+    };
+    $("#chats").appendChild(d);
+  }
+}
+
+function bubble(m) {
+  const d = document.createElement("div");
+  d.className = "m " + m.role;
+  d.textContent = m.content;
+  if (m.stats) {
+    const s = m.stats;
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = `${s.total_tokens ?? "?"} tok · prefill ${Math.round(s.prefill_rate ?? 0)} tok/s · decode ${Math.round(s.decode_rate ?? 0)} tok/s · ttft ${((s.ttft ?? 0) * 1000).toFixed(0)}ms` + (m.attempts > 1 ? ` · retry x${m.attempts}` : "");
+    d.appendChild(meta);
+  }
+  return d;
+}
+
+function renderMsgs(msgs, err) {
+  $("#msgs").innerHTML = "";
+  for (const m of msgs) $("#msgs").appendChild(bubble(m));
+  if (err) {
+    const e = document.createElement("div");
+    e.className = "err";
+    e.innerHTML = `⚠ ${err} <button>retry first prompt</button>`;
+    e.querySelector("button").onclick = () => retry();
+    $("#msgs").appendChild(e);
+  }
+  $("#msgs").scrollTop = 1e9;
+}
+
+async function open(id) {
+  current = id;
+  const { chat } = await api(`/api/chats/${id}`);
+  renderMsgs(chat.messages, chat.lastError && chat.lastError.message);
+  refreshBar();
+}
+
+async function send(text) {
+  $("#go").disabled = true;
+  try {
+    if (!current) {
+      const r = await api("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: text }) });
+      current = r.chat.id;
+      renderMsgs([{ role: "user", content: text }, { role: "assistant", content: r.reply, stats: r.stats, attempts: r.attempts }]);
+    } else {
+      await api(`/api/chats/${current}/messages`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: text }) });
+      await open(current);
+    }
+    $("#i").value = "";
+    refreshBar();
+  } catch (e) {
+    if (e.j && e.j.chatId) current = e.j.chatId;
+    renderMsgs(current ? (await api(`/api/chats/${current}`)).chat.messages : [{ role: "user", content: text }], e.message);
+    refreshBar();
+  } finally {
+    $("#go").disabled = false;
+    $("#i").focus();
+  }
+}
+
+async function retry() {
+  $("#go").disabled = true;
+  try {
+    const r = await api(`/api/chats/${current}/retry`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    await open(current);
+    refreshBar();
+  } catch (e) {
+    alert(e.message);
+  } finally {
+    $("#go").disabled = false;
+  }
+}
+
+$("#f").onsubmit = (ev) => { ev.preventDefault(); const t = $("#i").value.trim(); if (t) send(t); };
+$("#new").onclick = () => { current = null; renderMsgs([]); refreshBar(); $("#i").focus(); };
+refreshBar();
+</script>
+</body>
+</html>

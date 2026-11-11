@@ -1,0 +1,8 @@
+{
+  "name": "chatjimmy-api",
+  "version": "1.0.0",
+  "description": "Web API + UI wrapper for chatjimmy.ai (Taalas llama3.1-8B): new chat on input, result fetch with retry",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "license": "MIT"
+}
